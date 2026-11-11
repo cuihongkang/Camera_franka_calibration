@@ -14,13 +14,15 @@ import numpy as np
 from PIL import Image
 
 
-def estimate_static_mask(images, threshold=25., percentile=90., min_area=.002, dilate=4):
+def estimate_static_mask(images, threshold=100., percentile=90., min_area=.002, dilate=4):
     """Mask (H,W bool, True = gripper) from a list of views (RGB or gray uint8).
 
     ``threshold`` (grey levels) bounds the ``percentile``-th absolute deviation from the
-    per-pixel median for a static pixel; it must exceed the gripper's own shading changes
-    and stay well below the board's black/white contrast.  Use 20+ views with the board
-    spread over the image.
+    per-pixel median for a static pixel.  It must exceed the gripper's own shading changes
+    as the arm reorients under fixed lights (~40-90 grey levels on the rendered Panda hand)
+    and stay below the black/white contrast of the board (~200).  Use 20+ views with the
+    board spread over the image; check the saved mask, and draw one by hand if a shiny
+    gripper defeats this test.
     """
     gray = np.stack([cv2.cvtColor(im, cv2.COLOR_RGB2GRAY) if im.ndim == 3 else im for im in images]).astype(np.float32)
     if len(gray) < 5:

@@ -5,3 +5,4 @@ data/
 logs/
 results/**/images/
 assets/isaac_5_1/
+results/*/corners.npz

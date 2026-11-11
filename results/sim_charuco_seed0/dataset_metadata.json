@@ -1,0 +1,29 @@
+{
+ "plan": "/home/cuihongkang/panda_joint_calib/configs/poses_sim_charuco.json",
+ "views": 300,
+ "board": {
+  "type": "charuco",
+  "cols": 12,
+  "rows": 9,
+  "square": 0.03,
+  "marker": 0.022,
+  "dictionary": "DICT_5X5_100",
+  "min_corners": 20
+ },
+ "image_size": [
+  1280,
+  960
+ ],
+ "gripper_opening_m": 0.02,
+ "physics_dt": 0.004166666666666667,
+ "settle_steps": 600,
+ "rt_subframes": 16,
+ "renderer": "RaytracedLighting, anti_aliasing=0",
+ "usd": "/home/cuihongkang/panda_joint_calib/assets/isaac_5_1/Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd",
+ "usd_urdf_origin_max_abs_diff": 4.768372784585771e-07,
+ "encoder": "drive target (motor side)",
+ "torque": "get_measured_joint_efforts",
+ "hand_mass_model": "URDF + payload",
+ "link_inertia": "URDF diagonal (asset values ~1e-6 kg m^2 make stiff drives ill-conditioned)",
+ "notes": "calibration reads samples.npz + images only; truth_* files are for evaluation"
+}
