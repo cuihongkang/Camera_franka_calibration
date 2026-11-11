@@ -5,11 +5,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from panda_calib.board import Checkerboard
+from panda_calib.board import CharucoBoard, Checkerboard
 from panda_calib.camera import project, unpack_intrinsics
 from panda_calib.export import write_urdf
 from panda_calib.ik import compensate_compliance, solve_ik
 from panda_calib.kinematics import PandaModel, invert, pose_error, transform
+from panda_calib.occlusion import estimate_static_mask
 from panda_calib import synthetic as S
 
 Q = np.array([[0., -.3, 0., -2.2, 0., 2., .785],
@@ -115,6 +116,65 @@ class CameraBoardTest(unittest.TestCase):
             pts = board.object_points@T[:3, :3].T+T[:3, 3]
             err = np.linalg.norm(corners-project(pts, intr), axis=1)
             self.assertLess(err.max(), .5, f'roll {np.degrees(roll)}')
+
+
+def render_charuco(board, T_cam_board, intrinsics, size=S.IMAGE_SIZE, n=120):
+    tex = board.image(n)
+    s = board.square
+    A = np.array([[s/n, 0, .5*s/n], [0, -s/n, board.rows*s-.5*s/n], [0, 0, 1]])  # pixel centre -> board, y up
+    K, _ = unpack_intrinsics(intrinsics)
+    return cv2.warpPerspective(tex, K@np.c_[T_cam_board[:3, :2], T_cam_board[:3, 3]]@A, size,
+                               flags=cv2.INTER_AREA, borderValue=170)
+
+
+def gripper_overlay(image, mask, rng):
+    out = image.copy()
+    shade = np.linspace(40, 90, mask.shape[1])[None].repeat(mask.shape[0], 0)  # static, textured
+    out[mask] = shade[mask].astype(np.uint8)
+    return out
+
+
+class OcclusionTest(unittest.TestCase):
+    board = CharucoBoard()
+    mask = np.zeros(S.IMAGE_SIZE[::-1], bool)
+    mask[:, :260] = True; mask[380:600, 260:420] = True  # finger and pad on the left
+
+    def view(self, rng):
+        c = self.board.object_points.mean(0)
+        T = (transform([np.pi, 0., 0.], [rng.uniform(-.05, .05), rng.uniform(-.05, .05), rng.uniform(.45, .6)])
+             @transform([rng.uniform(-.3, .3), rng.uniform(-.3, .3), 0.])@transform([0., 0., rng.uniform(-np.pi, np.pi)])
+             @transform(translation=-c))
+        return T, render_charuco(self.board, T, S.NOMINAL_INTRINSICS)
+
+    def test_charuco_frame_and_partial_detection(self):
+        rng = np.random.default_rng(0)
+        for _ in range(4):
+            T, image = self.view(rng)
+            image = gripper_overlay(image, self.mask, rng)
+            corners = self.board.detect(image, self.mask)
+            truth = project(self.board.object_points@T[:3, :3].T+T[:3, 3], S.NOMINAL_INTRINSICS)
+            ok = np.isfinite(corners[:, 0])
+            self.assertGreaterEqual(ok.sum(), self.board.min_corners)
+            self.assertLess(np.linalg.norm(corners[ok]-truth[ok], axis=1).max(), 1.)
+            # nothing reported on or next to the gripper
+            u, v = np.rint(corners[ok]).astype(int).T
+            self.assertFalse(self.mask[v, u].any())
+
+    def test_static_mask_recovers_gripper(self):
+        rng = np.random.default_rng(1)
+        images = [gripper_overlay(self.view(rng)[1], self.mask, rng) for _ in range(25)]
+        est = estimate_static_mask(images)
+        self.assertGreater(est[self.mask].mean(), .99)  # no gripper pixel left unmasked
+        # Extra masked area may only be background the board never reached: no corner is lost.
+        lost, seen = 0, 0
+        for _ in range(10):
+            T, image = self.view(rng)
+            uv = project(self.board.object_points@T[:3, :3].T+T[:3, 3], S.NOMINAL_INTRINSICS)
+            u, v = np.rint(uv).astype(int).T
+            inside = (u >= 0) & (u < self.mask.shape[1]) & (v >= 0) & (v < self.mask.shape[0])
+            free = inside.copy(); free[inside] = ~self.mask[v[inside], u[inside]]
+            seen += free.sum(); lost += est[v[free], u[free]].sum()
+        self.assertLess(lost/seen, .05)  # corners within the 4 px safety dilation of the gripper edge
 
 
 if __name__ == '__main__':

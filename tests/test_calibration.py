@@ -52,5 +52,28 @@ class SyntheticRecoveryTest(unittest.TestCase):
         self.assertEqual(n_geo+12, 4*7+6)  # complete, minimal: 4R + 6 with board and hand-eye
 
 
+class PartialViewTest(unittest.TestCase):
+    """Views with a third of the corners missing (gripper occlusion) must give the same accuracy."""
+
+    def test_recovery_with_missing_corners(self):
+        rng = np.random.default_rng(4)
+        model, board = PandaModel.from_urdf(), Checkerboard()
+        q, _ = sample_configurations(model, board, S.BOARD_POSE, S.NOMINAL_MOUNT, S.NOMINAL_INTRINSICS,
+                                     S.IMAGE_SIZE, 80, rng)
+        truth = S.random_truth(rng)
+        uv, tau, T_cam, _ = S.observe(model, board, q, truth, rng, pixel_noise=.15)
+        # Drop every corner in the left third of the image, as a wrist gripper would.
+        uv[uv[..., 0] < S.IMAGE_SIZE[0]/3] = np.nan
+        samples = Samples(q, tau, uv, S.IMAGE_SIZE)
+        self.assertLess(samples.valid.mean(), .95)
+        train, test = samples.subset(slice(0, 60)), samples.subset(slice(60, None))
+        r = calibrate(model, board, train, 'full')
+        self.assertLess(reprojection_rms(r, test), .3)
+        p = r['params']
+        est = invert(invert(r['problem'].camera_poses(p, test))@p['T_base_board'])
+        true = invert(invert(T_cam[60:])@truth['T_base_board'])
+        self.assertLess(pose_error(est, true)[0].max()*1e3, .3)
+
+
 if __name__ == '__main__':
     unittest.main()

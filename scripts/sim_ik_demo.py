@@ -38,7 +38,7 @@ from isaacsim.core.api import World
 from isaacsim.core.prims import SingleArticulation, SingleXFormPrim
 from isaacsim.core.utils.types import ArticulationAction
 
-from panda_calib.board import Checkerboard
+from panda_calib.board import board_from_meta
 from panda_calib.camera import unpack_intrinsics
 from panda_calib.export import load_result
 from panda_calib.ik import compensate_compliance, solve_ik
@@ -55,7 +55,8 @@ MODELS = {'handeye': 'nominal kinematics + hand-eye', 'geometry': 'calibrated ge
 def board_estimate(model, cal, q, tau, corners, board):
     """Base -> board from one view, using the model's kinematics, hand-eye and intrinsics."""
     K, dist = unpack_intrinsics(cal['intrinsics'])
-    ok, rvec, tvec = cv2.solvePnP(board.object_points, corners, K, dist, flags=cv2.SOLVEPNP_ITERATIVE)
+    v = np.isfinite(corners[:, 0])
+    ok, rvec, tvec = cv2.solvePnP(board.object_points[v], corners[v], K, dist, flags=cv2.SOLVEPNP_ITERATIVE)
     assert ok
     T_cam_board = transform(rvec.ravel(), tvec.ravel())
     q_link = link_side_angles(q, tau, cal['compliance'])
@@ -66,9 +67,9 @@ def main():
     results = a.results or ROOT/'results'/a.dataset.name
     truth = json.loads((a.dataset/'truth.json').read_text())
     meta = json.loads((a.dataset/'metadata.json').read_text())
-    board = Checkerboard(meta['board']['cols'], meta['board']['rows'], meta['board']['square'])
+    board = board_from_meta(meta['board'])
     data = np.load(a.dataset/'samples.npz')
-    corners = np.load(a.dataset/'corners.npz')['corners']
+    corners = np.load(results/'corners.npz')['corners']
     test = json.loads((results/'summary.json').read_text())['test']
     cals = {m: load_result(results/m/'calibration.json') for m in MODELS}
     nominal = PandaModel.from_urdf()

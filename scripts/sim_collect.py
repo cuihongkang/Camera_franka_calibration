@@ -51,10 +51,11 @@ from isaacsim.core.prims import SingleArticulation, SingleXFormPrim
 from isaacsim.core.utils.types import ArticulationAction
 from isaacsim.sensors.camera import Camera
 
-from panda_calib.board import Checkerboard
+from panda_calib.board import board_from_meta
+from panda_calib.occlusion import save_mask
 from panda_calib.kinematics import ARM_JOINTS, PandaModel, invert, transform
 from panda_calib import synthetic as S
-from sim_robot import build_board, inject_errors, joint_origins, set_joint_drives, set_payload, set_urdf_inertia
+from sim_robot import build_board, inject_errors, joint_origins, label_gripper, set_joint_drives, set_payload, set_urdf_inertia
 
 ROBOT = '/World/Franka'
 USD = ROOT/'assets/isaac_5_1/Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd'
@@ -63,9 +64,9 @@ USD = ROOT/'assets/isaac_5_1/Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd'
 def main():
     plan = json.loads(a.plan.read_text())
     q_plan = np.array(plan['q'])[:a.limit]
-    board = Checkerboard(plan['board']['cols'], plan['board']['rows'], plan['board']['square'])
+    board = board_from_meta(plan['board'])
     rng = np.random.default_rng(a.truth_seed)
-    truth = S.random_truth(rng, a.translation_mm, a.rotation_deg)
+    truth = S.random_truth(rng, a.translation_mm, a.rotation_deg, nominal_mount=np.array(plan['T_hand_cam_guess']))
     stiffness = S.DEFAULT_STIFFNESS if a.stiffness is None else np.array(a.stiffness)
     truth['compliance'] = 1/stiffness
     T_world_board = np.array(plan['T_base_board_guess'])@transform(rng.normal(0, np.deg2rad(.5), 3)*[0, 0, 1],
@@ -89,7 +90,8 @@ def main():
     stage.GetPrimAtPath(ROBOT).GetAttribute('physxArticulation:enabledSelfCollisions').Set(False)
     set_payload(stage, ROBOT, a.payload_kg, a.payload_com)
     set_urdf_inertia(stage, ROBOT, ROOT/'configs/panda_arm_hand.urdf')
-    build_board(stage, board, T_world_board)
+    build_board(stage, board, T_world_board, a.output/'board_texture.png')
+    label_gripper(stage, ROBOT)
     dome = UsdLux.DomeLight.Define(stage, '/World/Dome'); dome.CreateIntensityAttr(900.)
     sun = UsdLux.DistantLight.Define(stage, '/World/Sun'); sun.CreateIntensityAttr(1500.); sun.CreateAngleAttr(20.)
     UsdGeom.Xformable(sun).AddRotateXYZOp().Set(Gf.Vec3f(15., 10., 0.))
@@ -109,6 +111,9 @@ def main():
     cam.set_focal_length(fx*36./w); cam.set_clipping_range(.02, 20.)
     params_ann = rep.AnnotatorRegistry.get_annotator('camera_params')
     params_ann.attach([cam.get_render_product_path()])
+    seg_ann = rep.AnnotatorRegistry.get_annotator('semantic_segmentation', init_params={'colorize': False})
+    seg_ann.attach([cam.get_render_product_path()])
+    gripper_union = None
     rep.orchestrator.set_capture_on_play(False)
 
     names = robot.dof_names
@@ -132,6 +137,10 @@ def main():
         qd = q_link-q_before  # position change over the last 0.5 s: convergence check
         tau = robot.get_measured_joint_efforts()[arm]
         timeline.pause(); timeline.commit()
+        # Without a few app updates the renderer keeps stale poses for the gripper meshes
+        # after headless physics steps (they vanish from the wrist view).
+        for _ in range(3):
+            app.update()
         rep.orchestrator.step(rt_subframes=a.rt_subframes, delta_time=0., pause_timeline=True)
         view = np.asarray(params_ann.get_data()['cameraViewTransform']).reshape(4, 4)
         T_world_cam = np.linalg.inv(np.diag([1., -1., -1., 1.])@view.T)  # renderer -> OpenCV axes
@@ -140,6 +149,10 @@ def main():
         T_world_hand[:3, :3] = np.array(Gf.Matrix3d(Gf.Quatd(float(quat[0]), Gf.Vec3d(*map(float, quat[1:]))))).T
         rgb = np.asarray(cam.get_rgba())[..., :3]
         Image.fromarray(rgb).save(a.output/'images'/f'{n:06d}.png')
+        seg = seg_ann.get_data()
+        ids = [int(k) for k, v in seg['info']['idToLabels'].items() if 'gripper' in str(v)]
+        gripper = np.isin(np.asarray(seg['data']).squeeze(), ids)
+        gripper_union = gripper if gripper_union is None else gripper_union | gripper
         T_fk = model.fk(q_link[None], truth['geo'])[0]
         records.append(dict(q_cmd=q_cmd, q_link=q_link, tau=tau, qd=qd, T_world_cam=T_world_cam,
                             T_world_hand=T_world_hand, T_fk_hand=T_fk))
@@ -150,6 +163,8 @@ def main():
                   f'  tau {np.round(tau, 2)}  hand FK err {fk_err:.4f} mm  camera err {cam_err:.4f} mm', flush=True)
 
     rec = {k: np.stack([r[k] for r in records]) for k in records[0]}
+    save_mask(gripper_union, a.output/'truth_gripper_mask.png')
+    print(f'gripper covers {gripper_union.mean()*100:.1f}% of the image', flush=True)
     w_, h_ = cam.get_resolution()
     K = cam.get_intrinsics_matrix()
     np.savez(a.output/'samples.npz', q=rec['q_cmd'], tau=rec['tau'], image_size=np.array([w_, h_]))
@@ -162,11 +177,12 @@ def main():
         seed=a.truth_seed, translation_mm=a.translation_mm, rotation_deg=a.rotation_deg), indent=1))
     (a.output/'metadata.json').write_text(json.dumps(dict(
         plan=str(a.plan), views=len(q_plan), board=plan['board'], image_size=[int(w_), int(h_)],
+        gripper_opening_m=.02,
         physics_dt=1/240, settle_steps=a.settle_steps, rt_subframes=a.rt_subframes,
         renderer='RaytracedLighting, anti_aliasing=0', usd=str(USD), usd_urdf_origin_max_abs_diff=origin_check,
         encoder='drive target (motor side)', torque='get_measured_joint_efforts', hand_mass_model='URDF + payload',
         link_inertia='URDF diagonal (asset values ~1e-6 kg m^2 make stiff drives ill-conditioned)',
-        notes='calibration reads samples.npz + images only'), indent=1))
+        notes='calibration reads samples.npz + images only; truth_* files are for evaluation'), indent=1))
     print('DONE', a.output, flush=True)
 
 

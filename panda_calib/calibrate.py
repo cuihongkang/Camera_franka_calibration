@@ -1,8 +1,9 @@
 """Joint estimation of Panda frame errors, joint compliance, hand-eye and intrinsics.
 
-Observations are full checkerboard detections from an eye-in-hand camera at
-static configurations, with encoder angles and measured joint torques.
-Residuals are corner reprojection errors in pixels.
+Observations are board-corner detections from an eye-in-hand camera at static
+configurations, with encoder angles and measured joint torques.  Corners that were
+not observed (occluded by the gripper, outside the image) are NaN and contribute no
+residual.  Residuals are corner reprojection errors in pixels.
 """
 from dataclasses import dataclass, field
 
@@ -27,11 +28,15 @@ AXES = 'xyz'
 class Samples:
     q: np.ndarray        # (N,7) encoder readings, rad
     tau: np.ndarray      # (N,7) measured joint torques, N m
-    corners: np.ndarray  # (N,K,2) detected corners in board order, px
+    corners: np.ndarray  # (N,K,2) detected corners in board order, px; NaN = not observed
     image_size: tuple    # (width, height)
 
     def subset(self, index):
         return Samples(self.q[index], self.tau[index], self.corners[index], self.image_size)
+
+    @property
+    def valid(self):
+        return np.isfinite(self.corners).all(axis=-1)
 
 
 @dataclass
@@ -98,14 +103,19 @@ class Problem:
 
     def residual(self, x, samples=None):
         s = self.samples if samples is None else samples
-        return (self.predict(self.unpack(x), s)-s.corners).ravel()
+        return (self.predict(self.unpack(x), s)-s.corners)[s.valid].ravel()
 
 
 def initialise(model, board, samples, T_hand_cam_prior=None):
     """Intrinsics from cv2.calibrateCamera, hand-eye from Park's method on nominal FK."""
-    obj = [board.object_points.astype(np.float32)]*len(samples.q)
-    img = [c.astype(np.float32).reshape(-1, 1, 2) for c in samples.corners]
-    rms, K, dist, rvecs, tvecs = cv2.calibrateCamera(obj, img, tuple(samples.image_size), None, None)
+    valid = samples.valid
+    obj = [board.object_points[v].astype(np.float32) for v in valid]
+    img = [c[v].astype(np.float32).reshape(-1, 1, 2) for c, v in zip(samples.corners, valid)]
+    # Partial (non-coplanar-grid) views need an intrinsic guess; a centred pinhole is enough.
+    w, h = samples.image_size
+    K0 = np.array([[w, 0., w/2], [0., w, h/2], [0., 0., 1.]])
+    rms, K, dist, rvecs, tvecs = cv2.calibrateCamera(obj, img, tuple(samples.image_size), K0, None,
+                                                     flags=cv2.CALIB_USE_INTRINSIC_GUESS)
     T_cam_board = transform(np.array(rvecs).reshape(-1, 3), np.array(tvecs).reshape(-1, 3))
     T_base_hand = model.fk(samples.q)
     if T_hand_cam_prior is None:
@@ -193,7 +203,8 @@ def calibrate(model, board, samples, mode='full', init=None, estimate_intrinsics
     except np.linalg.LinAlgError:
         std = np.full(free.size, np.nan)
     params = problem.unpack(x)
-    per_image = np.sqrt((r.reshape(len(samples.q), -1, 2)**2).sum(-1).mean(-1))
+    d = np.zeros(samples.corners.shape); d[samples.valid] = r.reshape(-1, 2)
+    per_image = np.sqrt((d**2).sum(-1).sum(-1)/samples.valid.sum(-1))
     return dict(mode=mode, params=params, x=x, free=[L.names[i] for i in free],
                 std={L.names[i]: float(s) for i, s in zip(free, std)},
                 fixed_redundant=[L.names[i] for i in sorted(candidates-set(free.tolist()))],
@@ -206,5 +217,5 @@ def calibrate(model, board, samples, mode='full', init=None, estimate_intrinsics
 
 def reprojection_rms(result, samples):
     problem = result['problem']
-    d = problem.predict(result['params'], samples)-samples.corners
+    d = (problem.predict(result['params'], samples)-samples.corners)[samples.valid]
     return float(np.sqrt((d**2).sum(-1).mean()))

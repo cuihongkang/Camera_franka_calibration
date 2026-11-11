@@ -5,13 +5,16 @@ from .camera import project
 from .kinematics import invert, transform
 
 DEFAULT_STIFFNESS = np.array([8000., 6000., 7000., 5000., 3000., 2500., 2000.])  # N m / rad
-NOMINAL_MOUNT = transform(np.zeros(3), [.065, 0., .05])  # panda_hand -> camera (OpenCV axes)
+# panda_hand -> camera (OpenCV axes = hand axes, then tilted 10 deg about hand y towards the
+# gripper axis): a wrist camera that sees the fingers in one side of the image.
+NOMINAL_MOUNT = transform([0., np.deg2rad(-10.), 0.], [.065, 0., 0.])
 NOMINAL_INTRINSICS = np.array([924.4, 924.4, 640., 480., 0., 0., 0., 0., 0.])
 IMAGE_SIZE = (1280, 960)
 BOARD_POSE = transform(np.zeros(3), [.42, -.15, 0.])  # base -> board inner corner (0,0)
 
 
-def random_truth(rng, translation_mm=.6, rotation_deg=.15, flange=False, mount_mm=3., mount_deg=1.):
+def random_truth(rng, translation_mm=.6, rotation_deg=.15, flange=False, mount_mm=3., mount_deg=1.,
+                 nominal_mount=NOMINAL_MOUNT):
     """Per-joint frame errors (N_FRAMES,6), compliance and a perturbed camera mount."""
     geo = np.zeros((8, 6))
     geo[:7, :3] = rng.normal(0., translation_mm*1e-3, (7, 3))
@@ -19,7 +22,7 @@ def random_truth(rng, translation_mm=.6, rotation_deg=.15, flange=False, mount_m
     if flange:
         geo[7, :3] = rng.normal(0., translation_mm*1e-3, 3)
         geo[7, 3:] = rng.normal(0., np.deg2rad(rotation_deg), 3)
-    mount = NOMINAL_MOUNT@transform(rng.normal(0., np.deg2rad(mount_deg), 3), rng.normal(0., mount_mm*1e-3, 3))
+    mount = np.asarray(nominal_mount)@transform(rng.normal(0., np.deg2rad(mount_deg), 3), rng.normal(0., mount_mm*1e-3, 3))
     return dict(geo=geo, compliance=1/DEFAULT_STIFFNESS, T_hand_cam=mount, T_base_board=BOARD_POSE,
                 intrinsics=NOMINAL_INTRINSICS)
 
